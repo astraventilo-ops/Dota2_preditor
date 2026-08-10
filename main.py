@@ -27,7 +27,7 @@ threading.Thread(target=run_web_server, daemon=True).start()
 # -------------------------------------------------------------
 TELEGRAM_TOKEN = "VOTRE_TOKEN_TELEGRAM_ICI"
 TELEGRAM_CHAT_ID = "8594543473"
-MODEL_PATH = "models/dota_xgb.pkl"
+MODEL_PATH = "dota_xgb.pkl"
 
 # Chargement du modèle XGBoost entraîné sur Colab
 try:
