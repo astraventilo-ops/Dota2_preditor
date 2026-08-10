@@ -8,36 +8,26 @@ from flask import Flask
 from bs4 import BeautifulSoup
 from playwright.sync_api import sync_playwright
 
-# Ignore le warning de version XGBoost
 warnings.filterwarnings("ignore", category=UserWarning)
 
-# --- 1. CONFIGURATION DU SERVEUR FLASK (Pour la gratuité Render) ---
 app = Flask(__name__)
 
 @app.route("/")
 def home():
-    return "Bot Dota 2 actif sur Render (Plan Gratuit) !"
+    return "Bot Dota 2 actif sur Render !"
 
-@app.route("/healthz")
-def health_check():
-    return "OK", 200
-
-# --- 2. CONFIGURATION BOT & SCRAPING ---
 TELEGRAM_TOKEN = "8840292681:AAHoBm9SlLC9HRDGwHs9VyRKR1BnFXD063Y"
 TELEGRAM_CHAT_ID = "8594543473"
 MODEL_PATH = "dota_xgb.pkl"
 
-# Chargement du modèle
-model = None
-if os.path.exists(MODEL_PATH):
+alert_cache = {}
+
+def send_alert(message):
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     try:
-        with open(MODEL_PATH, "rb") as f:
-            model = pickle.load(f)
-        print("✅ Modèle chargé avec succès.")
+        requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "Markdown"})
     except Exception as e:
-        print(f"❌ Erreur lors du chargement du modèle : {e}")
-else:
-    print(f"⚠️ Fichier {MODEL_PATH} introuvable.")
+        print(f"❌ Erreur envoi Telegram : {e}")
 
 def get_live_cyberscore_matches():
     url = "https://cyberscore.live/en/match/"
@@ -47,41 +37,48 @@ def get_live_cyberscore_matches():
             browser = p.chromium.launch(headless=True)
             page = browser.new_page()
             page.goto(url, wait_until="networkidle", timeout=60000)
-            time.sleep(3)
-            soup = BeautifulSoup(page.content(), "html.parser")
+            time.sleep(4)
+            html = page.content()
             browser.close()
 
-        for match in soup.find_all("div", class_="match-card"):
-            try:
-                teams = match.find_all("span", class_="team-name")
-                if len(teams) >= 2:
-                    matches.append((teams[0].text.strip(), teams[1].text.strip()))
-            except:
-                continue
+        soup = BeautifulSoup(html, "html.parser")
+        
+        # Recherche globale de tous les liens vers les matchs (/en/match/xxxx)
+        match_links = soup.find_all("a", href=lambda href: href and "/en/match/" in href)
+        
+        for link in match_links:
+            text = link.get_text(separator=" ", strip=True)
+            if text and "vs" in text.lower():
+                matches.append(text)
+
     except Exception as e:
         print(f"❌ Erreur Scraping Playwright : {e}")
     return matches
 
 def run_bot():
     print("🚀 Boucle de scraping démarrée...")
+    # Notification de confirmation au démarrage du serveur
+    send_alert("🟢 **Bot démarré avec succès sur Render !**\nLe scan des matchs Cyber Score est actif.")
+
     while True:
         try:
-            live_teams = get_live_cyberscore_matches()
-            print(f"📡 Scan terminé : {len(live_teams)} matchs trouvés.")
-            for t1, t2 in live_teams:
-                print(f"🔍 Match en direct : {t1} vs {t2}")
+            live_matches = get_live_cyberscore_matches()
+            print(f"📡 Scan terminé : {len(live_matches)} matchs détectés.")
+            
+            for m in live_matches:
+                print(f"🔍 Match trouvé : {m}")
+                if m not in alert_cache:
+                    send_alert(f"🎮 **Match Cyber Score détecté :**\n{m}")
+                    alert_cache[m] = True
+
         except Exception as e:
             print(f"❌ Erreur cycle bot : {e}")
         
-        # Scan toutes les 5 minutes
-        time.sleep(300)
+        time.sleep(180) # Scan toutes les 3 minutes
 
-# --- 3. DÉMARRAGE DU PROGRAMME ---
 if __name__ == "__main__":
-    # Lancement du bot dans un thread séparé
     bot_thread = threading.Thread(target=run_bot, daemon=True)
     bot_thread.start()
 
-    # Démarrage du serveur Flask sur le port fourni par Render (ou 10000 par défaut)
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
