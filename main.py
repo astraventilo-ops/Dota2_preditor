@@ -25,7 +25,7 @@ threading.Thread(target=run_web_server, daemon=True).start()
 # -------------------------------------------------------------
 # 1. CONFIGURATION TELEGRAM ET MODÈLE
 # -------------------------------------------------------------
-TELEGRAM_TOKEN = "VOTRE_TOKEN_TELEGRAM_ICI"
+TELEGRAM_TOKEN = "8840292681:AAHoBm9SlLC9HRDGwHs9VyRKR1BnFXD063Y"
 TELEGRAM_CHAT_ID = "8594543473"
 MODEL_PATH = "dota_xgb.pkl"
 
