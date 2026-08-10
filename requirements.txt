@@ -1,7 +1,5 @@
 flask
 requests
 beautifulsoup4
-playwright
 pandas
 xgboost
-scikit-learn
