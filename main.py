@@ -13,23 +13,22 @@ app = Flask(__name__)
 
 @app.route('/')
 def health_check():
-    return "Bot Dota 2 actif 24h/24 sur Render !", 200
+    return "Bot Dota 2 LIVE actif 24h/24 !", 200
 
 def run_web_server():
-    # Render attribue automatiquement le port 10000 par défaut
     app.run(host='0.0.0.0', port=10000)
 
-# Démarrage du serveur web dans un thread séparé en arrière-plan
+# Démarrage du serveur web dans un thread séparé
 threading.Thread(target=run_web_server, daemon=True).start()
 
 # -------------------------------------------------------------
 # 1. CONFIGURATION TELEGRAM ET MODÈLE
 # -------------------------------------------------------------
-TELEGRAM_TOKEN = "8840292681:AAHoBm9SlLC9HRDGwHs9VyRKR1BnFXD063Y"
+TELEGRAM_TOKEN = "VOTRE_TOKEN_TELEGRAM_ICI"
 TELEGRAM_CHAT_ID = "8594543473"
 MODEL_PATH = "dota_xgb.pkl"
 
-# Chargement du modèle XGBoost entraîné sur Colab
+# Chargement du modèle XGBoost
 try:
     with open(MODEL_PATH, "rb") as f:
         model = pickle.load(f)
@@ -38,9 +37,8 @@ except Exception as e:
     print(f"❌ Erreur lors du chargement du modèle : {e}")
     model = None
 
-# Dictionnaires pour éviter les spams d'alertes
-prematch_sent = set()        # Stocke les match_id déjà annoncés en pre-match
-live_last_predictions = {}   # Stocke la dernière probabilité envoyée {match_id: proba}
+# Stocke la dernière probabilité envoyée {match_id: proba} pour éviter les spams
+live_last_predictions = {}
 
 
 def send_telegram_alert(message):
@@ -57,50 +55,10 @@ def send_telegram_alert(message):
         print(f"Erreur d'envoi Telegram : {e}")
 
 # -------------------------------------------------------------
-# 2. PHASE 1 : ANALYSE PRE-MATCH
-# -------------------------------------------------------------
-def check_prematch_games():
-    """Analyse les matchs de ligue prévus et envoie le pronostic initial."""
-    url = "https://api.opendota.com/api/proMatches"
-    try:
-        res = requests.get(url, timeout=10)
-        if res.status_code != 200:
-            return
-        
-        matches = res.json()
-        
-        # On examine les matchs récents/à venir issus des ligues officielles
-        for match in matches[:10]:
-            match_id = match.get('match_id')
-            league_name = match.get('league_name', 'Ligue Officielle')
-            radiant_team = match.get('radiant_name', 'Radiant')
-            dire_team = match.get('dire_name', 'Dire')
-
-            # Si le match n'a pas encore été annoncé
-            if match_id and match_id not in prematch_sent:
-                favori = radiant_team
-                confiance = 58.0  # Estimation de départ avant coup d'envoi
-                
-                msg = (
-                    f"🏆 *PRONOSTIC PRE-MATCH*\n"
-                    f"Ligue : _{league_name}_\n\n"
-                    f"⚔️ *{radiant_team}* vs *{dire_team}*\n"
-                    f"🎯 Pronostic initial : *{favori}* ({confiance:.1f}% de confiance)\n"
-                    f"⏰ Status : Le suivi Live démarrera dès le coup d'envoi."
-                )
-                
-                send_telegram_alert(msg)
-                prematch_sent.add(match_id)
-                print(f"[Pre-Match] Alerte envoyée pour le match {match_id}")
-
-    except Exception as e:
-        print(f"Erreur lors du check Pre-Match : {e}")
-
-# -------------------------------------------------------------
-# 3. PHASE 2 : SUIVI ET MISE À JOUR EN LIVE
+# 2. SUIVI EXCLUSIF EN LIVE
 # -------------------------------------------------------------
 def check_live_games():
-    """Suit les matchs en cours et ajuste les pronostics avec XGBoost."""
+    """Suit uniquement les matchs en cours et calcule la probabilité XGBoost."""
     if not model:
         return
 
@@ -115,19 +73,19 @@ def check_live_games():
         for match in live_matches:
             league_id = match.get('league_id', 0)
             
-            # Filtrage : On ne garde que les matchs de ligue officielle
+            # Filtrage strict : Uniquement les matchs de ligues officielles
             if not league_id or league_id == 0:
                 continue
 
             match_id = match.get('match_id')
-            radiant_team = match.get('radiant_name', 'Radiant')
-            dire_team = match.get('dire_name', 'Dire')
+            radiant_team = match.get('radiant_name') or 'Radiant'
+            dire_team = match.get('dire_name') or 'Dire'
             
             r_score = match.get('radiant_score', 0) or 0
             d_score = match.get('dire_score', 0) or 0
             duration = match.get('duration', 0) or 0
             
-            # Attendre au moins 3 minutes de jeu pour avoir des données stables
+            # Attendre au moins 3 minutes de jeu (180s) pour éviter les fausses données de draft
             if duration < 180:
                 continue
 
@@ -135,53 +93,46 @@ def check_live_games():
             kill_ratio = (r_score + 1) / (d_score + 1)
             duration_minutes = duration / 60.0
 
-            # Préparation des données pour le modèle XGBoost
+            # Préparation des features pour XGBoost
             features = pd.DataFrame([[r_score, d_score, kill_diff, kill_ratio, duration, duration_minutes]], 
                                     columns=['radiant_score', 'dire_score', 'kill_diff', 'kill_ratio', 'duration', 'duration_minutes'])
 
-            # Calcul de la probabilité XGBoost
+            # Calcul du pronostic
             prob_radiant = model.predict_proba(features)[0][1] * 100
             
-            # Détermination de l'équipe favorite en direct
             leader = radiant_team if prob_radiant >= 50 else dire_team
             confiance_live = prob_radiant if prob_radiant >= 50 else (100 - prob_radiant)
 
-            # Vérification de la variation par rapport à la dernière alerte
             last_prob = live_last_predictions.get(match_id, None)
 
-            # Règle d'envoi : Premier calcul Live OU variation de plus de 15% (Changement de dynamique)
+            # Règle d'envoi : 1er message au coup d'envoi OR variation de plus de 15% de probabilité
             if last_prob is None or abs(confiance_live - last_prob) >= 15.0:
                 
-                type_alerte = "🔄 *UPDATE LIVE (Changement de dynamique)*" if last_prob else "⚡ *DÉMARRAGE SUIVI LIVE*"
+                header = "⚡ *DÉMARRAGE MATCH LIVE*" if last_prob is None else "🔄 *REVIREMENT EN LIVE*"
                 
                 msg = (
-                    f"{type_alerte}\n\n"
+                    f"{header}\n\n"
                     f"⚔️ *{radiant_team}* vs *{dire_team}*\n"
-                    f"⏱️ Temps : {int(duration_minutes)} min | Score : {r_score} - {d_score}\n\n"
-                    f"🔥 Avantage actuel : *{leader}*\n"
-                    f"📊 Probabilité de victoire : *{confiance_live:.1f}%*\n"
+                    f"⏱️ Temps : {int(duration_minutes)} min | Kills : {r_score} - {d_score}\n\n"
+                    f"🔥 Équipe en tête : *{leader}*\n"
+                    f"📊 Confiance du modèle : *{confiance_live:.1f}%*\n"
                 )
                 
                 send_telegram_alert(msg)
                 live_last_predictions[match_id] = confiance_live
-                print(f"[Live] Mise à jour envoyée pour le match {match_id} ({confiance_live:.1f}%)")
+                print(f"[Live] Alerte envoyée pour le match {match_id} ({confiance_live:.1f}%)")
 
     except Exception as e:
         print(f"Erreur lors du check Live : {e}")
 
 # -------------------------------------------------------------
-# 4. BOUCLE PRINCIPALE (EXECUTION EN CONTINU)
+# 3. BOUCLE PRINCIPALE
 # -------------------------------------------------------------
 if __name__ == "__main__":
-    send_telegram_alert("🚀 *Bot Dota 2 Predictor (Web Service Free)* activé sur Render !")
-    print("Démarrage du serveur Web et de la boucle du bot...")
+    send_telegram_alert("🚀 *Mode Live Uniquement Activé !* Le bot ne suit plus que les matchs en direct.")
+    print("Démarrage du bot en mode 100% Live...")
 
     while True:
-        # 1. Vérification des matchs d'avant-match
-        check_prematch_games()
-        
-        # 2. Analyse des matchs en cours
         check_live_games()
-        
-        # Pause de 60 secondes entre chaque cycle d'analyse
+        # Scan des API toutes les 60 secondes
         time.sleep(60)
