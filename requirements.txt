@@ -4,4 +4,3 @@ playwright
 pandas
 xgboost
 scikit-learn
-flask
