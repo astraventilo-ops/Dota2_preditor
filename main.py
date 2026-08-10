@@ -5,6 +5,7 @@ import pickle
 import threading
 import warnings
 import requests
+import cloudscraper
 import pandas as pd
 from flask import Flask
 from bs4 import BeautifulSoup
@@ -61,7 +62,7 @@ def clean_and_parse_match(match_text):
     score_match = re.search(r'(\d+\s*-\s*\d+)', match_text)
     score_str = score_match.group(1) if score_match else "0 - 0"
     
-    # 3. Extraction de la Ligue / Tournoi
+    # 3. Extraction de la Ligue / Tournoi (prise en compte de 'T ier')
     league_str = "Ligue Inconnue"
     tier_split = re.split(r'T\s*ier\s*[-–]\s*\d+', match_text, flags=re.IGNORECASE)
     
@@ -105,23 +106,16 @@ def clean_and_parse_match(match_text):
     }
 
 def get_live_cyberscore_matches():
-    """Scrape Cyber Score avec des headers contournant le blocage Cloudflare."""
+    """Scrape Cyber Score en utilisant cloudscraper pour passer Cloudflare."""
     url = "https://cyberscore.live/en/matches/"
-    
-    # En-têtes complets navigateur desktop
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.9,fr;q=0.8",
-        "Referer": "https://cyberscore.live/",
-        "Connection": "keep-alive",
-        "Upgrade-Insecure-Requests": "1"
-    }
-
     parsed_matches = []
 
     try:
-        response = requests.get(url, headers=headers, timeout=15)
+        # Instanciation de cloudscraper
+        scraper = cloudscraper.create_scraper(
+            browser={'browser': 'chrome', 'platform': 'android', 'desktop': False}
+        )
+        response = scraper.get(url, timeout=15)
         print(f"🌐 Statut HTTP CyberScore : {response.status_code}")
         
         if response.status_code != 200:
@@ -153,7 +147,6 @@ def get_live_cyberscore_matches():
 
         for raw_text in extracted_raw:
             match_data = clean_and_parse_match(raw_text)
-            # Clé unique basée sur équipes + map pour éviter de spammer mais réémettre si changement
             match_data["match_key"] = f"{match_data['teams_raw']}_{match_data['map']}"
             parsed_matches.append(match_data)
 
