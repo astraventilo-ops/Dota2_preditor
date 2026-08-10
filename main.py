@@ -33,13 +33,17 @@ if os.path.exists(MODEL_PATH):
     except Exception as e:
         print(f"❌ Erreur lors du chargement du modèle : {e}")
 
-alert_cache = {}
+alert_cache = set()
 
 def send_alert(message):
     """Envoie un message formaté sur Telegram."""
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     try:
-        requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "Markdown"})
+        res = requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "Markdown"}, timeout=10)
+        if res.status_code == 200:
+            print("✉️ Alerte Telegram envoyée avec succès !")
+        else:
+            print(f"⚠️ Telegram HTTP {res.status_code}: {res.text}")
     except Exception as e:
         print(f"❌ Erreur envoi Telegram : {e}")
 
@@ -101,21 +105,32 @@ def clean_and_parse_match(match_text):
     }
 
 def get_live_cyberscore_matches():
-    """Scrape Cyber Score pour extraire les cartes de matchs LIVE."""
+    """Scrape Cyber Score avec des headers contournant le blocage Cloudflare."""
     url = "https://cyberscore.live/en/matches/"
+    
+    # En-têtes complets navigateur desktop
     headers = {
-        "User-Agent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9,fr;q=0.8",
+        "Referer": "https://cyberscore.live/",
+        "Connection": "keep-alive",
+        "Upgrade-Insecure-Requests": "1"
     }
 
     parsed_matches = []
 
     try:
         response = requests.get(url, headers=headers, timeout=15)
+        print(f"🌐 Statut HTTP CyberScore : {response.status_code}")
+        
         if response.status_code != 200:
+            print("⚠️ Réponse non valide de CyberScore.")
             return parsed_matches
 
         soup = BeautifulSoup(response.text, "html.parser")
         live_badges = [elem for elem in soup.find_all(string=True) if "LIVE" in elem]
+        print(f"🔍 Badges 'LIVE' repérés dans le HTML : {len(live_badges)}")
         
         extracted_raw = []
 
@@ -138,7 +153,8 @@ def get_live_cyberscore_matches():
 
         for raw_text in extracted_raw:
             match_data = clean_and_parse_match(raw_text)
-            match_data["raw_key"] = raw_text  # Clé unique pour le cache
+            # Clé unique basée sur équipes + map pour éviter de spammer mais réémettre si changement
+            match_data["match_key"] = f"{match_data['teams_raw']}_{match_data['map']}"
             parsed_matches.append(match_data)
 
     except Exception as e:
@@ -173,7 +189,6 @@ def analyze_and_predict(match_data):
         map_info = match_data["map"]
         score = match_data["score"]
 
-        # 1. Message de base propre
         msg = (
             f"🔴 *MATCH EN DIRECT DÉTECTÉ*\n\n"
             f"🏆 Ligue : *{league}*\n"
@@ -181,7 +196,6 @@ def analyze_and_predict(match_data):
             f"👥 Équipes : *{teams}*\n"
         )
 
-        # 2. Enrichissement avec OpenDota & XGBoost si disponible
         live_data = get_opendota_live_match(teams)
 
         if live_data:
@@ -225,11 +239,15 @@ def run_bot():
             live_matches = get_live_cyberscore_matches()
             print(f"📡 Scan terminé : {len(live_matches)} match(s) LIVE extrait(s).")
             
+            new_alerts = 0
             for match in live_matches:
-                cache_key = match["raw_key"]
-                if cache_key not in alert_cache:
+                key = match["match_key"]
+                if key not in alert_cache:
                     analyze_and_predict(match)
-                    alert_cache[cache_key] = True
+                    alert_cache.add(key)
+                    new_alerts += 1
+            
+            print(f"📊 {new_alerts} nouvelle(s) alerte(s) envoyée(s).")
 
         except Exception as e:
             print(f"❌ Erreur dans le cycle du bot : {e}")
