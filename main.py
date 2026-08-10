@@ -1,8 +1,26 @@
 import time
 import pickle
 import requests
+import threading
 import pandas as pd
 import numpy as np
+from flask import Flask
+
+# -------------------------------------------------------------
+# 0. SERVEUR WEB FLASK (POUR LE PLAN GRATUIT RENDER)
+# -------------------------------------------------------------
+app = Flask(__name__)
+
+@app.route('/')
+def health_check():
+    return "Bot Dota 2 actif 24h/24 sur Render !", 200
+
+def run_web_server():
+    # Render attribue automatiquement le port 10000 par défaut
+    app.run(host='0.0.0.0', port=10000)
+
+# Démarrage du serveur web dans un thread séparé en arrière-plan
+threading.Thread(target=run_web_server, daemon=True).start()
 
 # -------------------------------------------------------------
 # 1. CONFIGURATION TELEGRAM ET MODÈLE
@@ -60,8 +78,6 @@ def check_prematch_games():
 
             # Si le match n'a pas encore été annoncé
             if match_id and match_id not in prematch_sent:
-                # Calcul d'un score de forme de base ou cote statistique
-                # (Par défaut basé sur les historiques d'équipes)
                 favori = radiant_team
                 confiance = 58.0  # Estimation de départ avant coup d'envoi
                 
@@ -157,8 +173,8 @@ def check_live_games():
 # 4. BOUCLE PRINCIPALE (EXECUTION EN CONTINU)
 # -------------------------------------------------------------
 if __name__ == "__main__":
-    send_telegram_alert("🚀 *Bot Dota 2 Predictor (Pre-Match & Live)* activé sur Render !")
-    print("Démarrage de la boucle du bot...")
+    send_telegram_alert("🚀 *Bot Dota 2 Predictor (Web Service Free)* activé sur Render !")
+    print("Démarrage du serveur Web et de la boucle du bot...")
 
     while True:
         # 1. Vérification des matchs d'avant-match
