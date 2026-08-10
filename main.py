@@ -7,13 +7,13 @@ import numpy as np
 from flask import Flask
 
 # -------------------------------------------------------------
-# 0. SERVEUR WEB FLASK (POUR LE PLAN GRATUIT RENDER)
+# 0. SERVEUR WEB FLASK (KEEP ALIVE RENDER - PLAN GRATUIT)
 # -------------------------------------------------------------
 app = Flask(__name__)
 
 @app.route('/')
 def health_check():
-    return "Bot Dota 2 LIVE actif 24h/24 !", 200
+    return "Bot Dota 2 Predictor actif 24h/24 !", 200
 
 def run_web_server():
     app.run(host='0.0.0.0', port=10000)
@@ -37,7 +37,7 @@ except Exception as e:
     print(f"❌ Erreur lors du chargement du modèle : {e}")
     model = None
 
-# Stocke la dernière probabilité envoyée {match_id: proba} pour éviter les spams
+# Dictionnaire de mémoire {match_id: derniere_probabilite}
 live_last_predictions = {}
 
 
@@ -50,15 +50,17 @@ def send_telegram_alert(message):
         "parse_mode": "Markdown"
     }
     try:
-        requests.post(url, json=payload, timeout=10)
+        res = requests.post(url, json=payload, timeout=10)
+        if res.status_code != 200:
+            print(f"Erreur d'envoi Telegram ({res.status_code}) : {res.text}")
     except Exception as e:
         print(f"Erreur d'envoi Telegram : {e}")
 
 # -------------------------------------------------------------
-# 2. SUIVI EXCLUSIF EN LIVE
+# 2. ANALYSE ET DÉTECTION LIVE LARGE
 # -------------------------------------------------------------
 def check_live_games():
-    """Suit uniquement les matchs en cours et calcule la probabilité XGBoost."""
+    """Analyse tous les matchs en direct renvoyés par l'API OpenDota."""
     if not model:
         return
 
@@ -71,33 +73,34 @@ def check_live_games():
         live_matches = res.json()
 
         for match in live_matches:
-            league_id = match.get('league_id', 0)
-            
-            # Filtrage strict : Uniquement les matchs de ligues officielles
-            if not league_id or league_id == 0:
+            match_id = match.get('match_id')
+            radiant_team = match.get('radiant_name')
+            dire_team = match.get('dire_name')
+
+            # Ignorer uniquement si aucune équipe n'est identifiée
+            if not radiant_team and not dire_team:
                 continue
 
-            match_id = match.get('match_id')
-            radiant_team = match.get('radiant_name') or 'Radiant'
-            dire_team = match.get('dire_name') or 'Dire'
+            radiant_team = radiant_team or "Radiant"
+            dire_team = dire_team or "Dire"
             
             r_score = match.get('radiant_score', 0) or 0
             d_score = match.get('dire_score', 0) or 0
             duration = match.get('duration', 0) or 0
-            
-            # Attendre au moins 3 minutes de jeu (180s) pour éviter les fausses données de draft
-            if duration < 180:
+
+            # Prise en compte dès 1 minute de jeu (60s)
+            if duration < 60:
                 continue
 
             kill_diff = r_score - d_score
             kill_ratio = (r_score + 1) / (d_score + 1)
             duration_minutes = duration / 60.0
 
-            # Préparation des features pour XGBoost
+            # Calcul des variables (features) pour XGBoost
             features = pd.DataFrame([[r_score, d_score, kill_diff, kill_ratio, duration, duration_minutes]], 
                                     columns=['radiant_score', 'dire_score', 'kill_diff', 'kill_ratio', 'duration', 'duration_minutes'])
 
-            # Calcul du pronostic
+            # Prédiction
             prob_radiant = model.predict_proba(features)[0][1] * 100
             
             leader = radiant_team if prob_radiant >= 50 else dire_team
@@ -105,34 +108,35 @@ def check_live_games():
 
             last_prob = live_last_predictions.get(match_id, None)
 
-            # Règle d'envoi : 1er message au coup d'envoi OR variation de plus de 15% de probabilité
-            if last_prob is None or abs(confiance_live - last_prob) >= 15.0:
+            # Envoi : Premier scan du match OU variation >= 10%
+            if last_prob is None or abs(confiance_live - last_prob) >= 10.0:
                 
-                header = "⚡ *DÉMARRAGE MATCH LIVE*" if last_prob is None else "🔄 *REVIREMENT EN LIVE*"
+                status_header = "⚡ *ALERTE MATCH EN DIRECT*" if last_prob is None else "🔄 *EVOLUTION DES CHANCES*"
                 
                 msg = (
-                    f"{header}\n\n"
+                    f"{status_header}\n\n"
                     f"⚔️ *{radiant_team}* vs *{dire_team}*\n"
-                    f"⏱️ Temps : {int(duration_minutes)} min | Kills : {r_score} - {d_score}\n\n"
-                    f"🔥 Équipe en tête : *{leader}*\n"
-                    f"📊 Confiance du modèle : *{confiance_live:.1f}%*\n"
+                    f"⏱️ Temps : {int(duration_minutes)} min | Score : {r_score} - {d_score}\n\n"
+                    f"🎯 Équipe en tête : *{leader}*\n"
+                    f"📊 Probabilité estimée : *{confiance_live:.1f}%*\n"
                 )
                 
                 send_telegram_alert(msg)
                 live_last_predictions[match_id] = confiance_live
-                print(f"[Live] Alerte envoyée pour le match {match_id} ({confiance_live:.1f}%)")
+                print(f"[Live] Alerte envoyée pour {radiant_team} vs {dire_team} ({confiance_live:.1f}%)")
 
     except Exception as e:
-        print(f"Erreur lors du check Live : {e}")
+        print(f"Erreur lors du scan Live : {e}")
 
 # -------------------------------------------------------------
 # 3. BOUCLE PRINCIPALE
 # -------------------------------------------------------------
 if __name__ == "__main__":
-    send_telegram_alert("🚀 *Mode Live Uniquement Activé !* Le bot ne suit plus que les matchs en direct.")
-    print("Démarrage du bot en mode 100% Live...")
+    print("Démarrage du bot avec le nouveau Token Telegram...")
+    # Notification initiale au démarrage
+    send_telegram_alert("🚀 *Bot Predictor Connecté !* Analyse des matchs en direct en cours...")
 
     while True:
         check_live_games()
-        # Scan des API toutes les 60 secondes
-        time.sleep(60)
+        # Pause de 45 secondes entre chaque scan
+        time.sleep(45)
