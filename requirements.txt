@@ -3,4 +3,5 @@ requests
 beautifulsoup4
 pandas
 xgboost
+cloudscraper
 --extra-index-url https://pypi.org/simple
