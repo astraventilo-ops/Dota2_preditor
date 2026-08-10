@@ -1,96 +1,82 @@
 import time
-import pickle
 import requests
 import pandas as pd
-from flask import Flask
-import threading
+import pickle
+from bs4 import BeautifulSoup
+from playwright.sync_api import sync_playwright
 
-# -------------------------------------------------------------
-# CONFIGURATION
-# -------------------------------------------------------------
+# --- CONFIGURATION ---
 TELEGRAM_TOKEN = "8840292681:AAHoBm9SlLC9HRDGwHs9VyRKR1BnFXD063Y"
 TELEGRAM_CHAT_ID = "8594543473"
-STEAM_API_KEY = "VOTRE_CLE_STEAM_API"  # À obtenir gratuitement sur steamcommunity.com/dev/apikey
 MODEL_PATH = "dota_xgb.pkl"
 
-try:
-    with open(MODEL_PATH, "rb") as f:
-        model = pickle.load(f)
-    print("✅ Modèle XGBoost chargé !")
-except Exception as e:
-    print(f"❌ Erreur modèle : {e}")
-    model = None
+# Chargement du modèle
+with open(MODEL_PATH, "rb") as f:
+    model = pickle.load(f)
 
-live_last_predictions = {}
+# Cache pour éviter de spammer Telegram pour le même match
+alert_cache = {}
 
-def send_telegram_alert(message):
+def get_live_cyberscore_matches():
+    """Scrape Cyber Score pour trouver les matchs actifs."""
+    url = "https://cyberscore.live/en/match/"
+    matches = []
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.goto(url, wait_until="networkidle")
+        time.sleep(3) # Temps pour charger le JS
+        soup = BeautifulSoup(page.content(), "html.parser")
+        browser.close()
+
+    # Note: Adapter la classe 'match-card' selon le HTML réel de la page
+    for match in soup.find_all("div", class_="match-card"):
+        try:
+            teams = match.find_all("span", class_="team-name")
+            if len(teams) >= 2:
+                matches.append((teams[0].text.strip(), teams[1].text.strip()))
+        except: continue
+    return matches
+
+def get_opendota_live_data(team1, team2):
+    """Cherche dans l'API OpenDota si un match correspond aux équipes trouvées."""
+    try:
+        r = requests.get("https://api.opendota.com/api/live", timeout=10)
+        if r.status_code == 200:
+            games = r.json()
+            for game in games:
+                radiant = game.get('radiant_name', '')
+                dire = game.get('dire_name', '')
+                # Correspondance simple par nom
+                if (team1 in radiant or team1 in dire) and (team2 in radiant or team2 in dire):
+                    return game # Retourne toutes les stats du match
+        return None
+    except: return None
+
+def send_alert(message):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    payload = {"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "Markdown"}
+    requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "Markdown"})
+
+# --- BOUCLE PRINCIPALE ---
+print("Bot démarré...")
+while True:
     try:
-        requests.post(url, json=payload, timeout=10)
-    except Exception as e:
-        print(f"Erreur Telegram : {e}")
-
-# -------------------------------------------------------------
-# RÉCUPÉRATION DIRECTE DE VALVE (STEAM API)
-# -------------------------------------------------------------
-def check_valve_live_games():
-    if not model:
-        return
-
-    # Endpoint officiel de Valve pour TOUS les matchs de ligue en direct
-    url = f"https://api.steampowered.com/IDOTA2Match_570/GetLiveLeagueGames/v1/?key={STEAM_API_KEY}"
-    
-    try:
-        res = requests.get(url, timeout=10)
-        if res.status_code != 200:
-            return
+        live_teams = get_live_cyberscore_matches()
+        for t1, t2 in live_teams:
+            match_data = get_opendota_live_data(t1, t2)
             
-        data = res.json().get('result', {}).get('games', [])
-        print(f"[Scan Valve] {len(data)} matchs pro en direct détectés.")
-
-        for game in data:
-            match_id = game.get('match_id')
-            scoreboard = game.get('scoreboard')
-            
-            if not match_id or not scoreboard:
-                continue
-
-            # Informations équipes
-            radiant_team = game.get('radiant_team', {}).get('team_name', 'Radiant')
-            dire_team = game.get('dire_team', {}).get('team_name', 'Dire')
-
-            r_score = scoreboard.get('radiant', {}).get('score', 0)
-            d_score = scoreboard.get('dire', {}).get('score', 0)
-            duration = scoreboard.get('duration', 0)
-
-            if duration < 30:
-                continue
-
-            kill_diff = r_score - d_score
-            kill_ratio = (r_score + 1) / (d_score + 1)
-            duration_minutes = duration / 60.0
-
-            features = pd.DataFrame([[r_score, d_score, kill_diff, kill_ratio, duration, duration_minutes]], 
-                                    columns=['radiant_score', 'dire_score', 'kill_diff', 'kill_ratio', 'duration', 'duration_minutes'])
-
-            prob_radiant = model.predict_proba(features)[0][1] * 100
-            leader = radiant_team if prob_radiant >= 50 else dire_team
-            confiance_live = prob_radiant if prob_radiant >= 50 else (100 - prob_radiant)
-
-            last_prob = live_last_predictions.get(match_id)
-
-            if last_prob is None or abs(confiance_live - last_prob) >= 8.0:
-                msg = (
-                    f"⚡ *MATCH EN DIRECT (VALVE)*\n\n"
-                    f"🆔 Match ID : `{match_id}`\n"
-                    f"⚔️ *{radiant_team}* vs *{dire_team}*\n"
-                    f"⏱️ Temps : {int(duration_minutes)} min | Score : {r_score} - {d_score}\n\n"
-                    f"🎯 Avantage : *{leader}*\n"
-                    f"📊 Probabilité : *{confiance_live:.1f}%*\n"
-                )
-                send_telegram_alert(msg)
-                live_last_predictions[match_id] = confiance_live
-
+            if match_data:
+                m_id = match_data['match_id']
+                # Ici : extraire les stats (radiant_score, dire_score, etc.)
+                # features = préparer_features(match_data)
+                # proba = model.predict_proba(features)
+                
+                # Exemple d'envoi d'alerte si nouveau match
+                if m_id not in alert_cache:
+                    send_alert(f"🚀 Match détecté : {t1} vs {t2} (ID: {m_id})")
+                    alert_cache[m_id] = True
+        
+        time.sleep(60) # Scan toutes les minutes
     except Exception as e:
-        print(f"Erreur scan Valve : {e}")
+        print(f"Erreur : {e}")
+        time.sleep(60)
