@@ -1,4 +1,5 @@
 import os
+import re
 import time
 import pickle
 import threading
@@ -7,7 +8,6 @@ import requests
 import pandas as pd
 from flask import Flask
 from bs4 import BeautifulSoup
-from playwright.sync_api import sync_playwright
 
 warnings.filterwarnings("ignore", category=UserWarning)
 
@@ -43,93 +43,154 @@ def send_alert(message):
     except Exception as e:
         print(f"❌ Erreur envoi Telegram : {e}")
 
-def get_live_cyberscore_matches():
-    """
-    Extrait uniquement les matchs marqués 'LIVE' depuis https://cyberscore.live/en/matches/
-    """
-    url = "https://cyberscore.live/en/matches/"
-    live_matches = []
+def clean_and_parse_match(match_text):
+    """Analyse et nettoie le texte brut extrait d'une carte Cyber Score."""
     
-    try:
-        with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
-            page = browser.new_page()
-            
-            # Chargement de la page des matchs
-            page.goto(url, wait_until="networkidle", timeout=60000)
-            time.sleep(4)
-            
-            html = page.content()
-            browser.close()
+    # 1. Extraction Map et Format
+    map_match = re.search(r'(MAP\s*\d+)', match_text)
+    bo_match = re.search(r'(BO\s*\d+)', match_text)
+    
+    map_str = map_match.group(1) if map_match else "MAP 1"
+    bo_str = bo_match.group(1) if bo_match else "BO3"
+    
+    # 2. Extraction du Score
+    score_match = re.search(r'(\d+\s*-\s*\d+)', match_text)
+    score_str = score_match.group(1) if score_match else "0 - 0"
+    
+    # 3. Extraction de la Ligue / Tournoi
+    league_str = "Ligue Inconnue"
+    tier_split = re.split(r'T\s*ier\s*[-–]\s*\d+', match_text, flags=re.IGNORECASE)
+    
+    if len(tier_split) > 1:
+        league_raw = tier_split[1].strip()
+        league_raw = re.sub(r'^(Quick view|Add to favorites)\s*', '', league_raw, flags=re.IGNORECASE)
+        league_str = league_raw
+    else:
+        league_match = re.search(r'([A-Za-z0-9\s]+(?:League|Masters|Cup|Trophy|Tournament)[A-Za-z0-9\s/]+)', match_text)
+        if league_match:
+            league_str = league_match.group(1).strip()
 
-        soup = BeautifulSoup(html, "html.parser")
+    # 4. Nettoyage du bloc équipes
+    clean = match_text
+    noise_patterns = [
+        r'LIVE', r'MAP\s*\d+', r'BO\s*\d+', r'Quick view', r'Add to favorites',
+        r'Draft', r'T\s*ier\s*[-–]\s*\d+', r'\+?\d+(\.\d+)?k?', r'\d+:\d+', r'\d+\s*-\s*\d+'
+    ]
+    
+    for pattern in noise_patterns:
+        clean = re.sub(pattern, '', clean, flags=re.IGNORECASE)
         
-        # Récupération de tous les liens de matchs
-        links = soup.find_all("a", href=lambda h: h and "/en/match/" in h)
-        
-        for link in links:
-            text = link.get_text(" ", strip=True)
+    if league_str != "Ligue Inconnue":
+        clean = clean.replace(league_str, "")
+
+    clean = re.sub(r'\b\d+\.\d+\b', '', clean)
+
+    words = clean.split()
+    unique_words = []
+    for w in words:
+        if len(w) > 1 and (not unique_words or unique_words[-1] != w):
+            unique_words.append(w)
             
-            # FILTRE STRICT : Uniquement si la carte contient 'LIVE'
-            if "LIVE" in text:
-                # Nettoyage des espaces doubles
-                clean_text = " ".join(text.split())
-                if clean_text not in live_matches:
-                    live_matches.append(clean_text)
+    teams_raw = " ".join(unique_words)
+
+    return {
+        "map": f"{map_str} ({bo_str})",
+        "score": score_str,
+        "teams_raw": teams_raw,
+        "league": league_str
+    }
+
+def get_live_cyberscore_matches():
+    """Scrape Cyber Score pour extraire les cartes de matchs LIVE."""
+    url = "https://cyberscore.live/en/matches/"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
+    }
+
+    parsed_matches = []
+
+    try:
+        response = requests.get(url, headers=headers, timeout=15)
+        if response.status_code != 200:
+            return parsed_matches
+
+        soup = BeautifulSoup(response.text, "html.parser")
+        live_badges = [elem for elem in soup.find_all(string=True) if "LIVE" in elem]
+        
+        extracted_raw = []
+
+        for badge in live_badges:
+            current = badge.parent
+            card = None
+            for _ in range(6):
+                if current and current.name in ["a", "div", "article", "li"]:
+                    text_length = len(current.get_text(" ", strip=True))
+                    if 40 <= text_length <= 300:
+                        card = current
+                        break
+                if current:
+                    current = current.parent
+
+            if card:
+                full_text = " ".join(card.get_text(" ", strip=True).split())
+                if full_text not in extracted_raw:
+                    extracted_raw.append(full_text)
+
+        for raw_text in extracted_raw:
+            match_data = clean_and_parse_match(raw_text)
+            match_data["raw_key"] = raw_text  # Clé unique pour le cache
+            parsed_matches.append(match_data)
 
     except Exception as e:
         print(f"❌ Erreur Scraping : {e}")
         
-    return live_matches
+    return parsed_matches
 
-def get_opendota_live_match(team1_name, team2_name):
-    """Recherche la partie correspondante sur l'API OpenDota Live."""
+def get_opendota_live_match(teams_raw):
+    """Tente de trouver le match correspondant sur l'API OpenDota Live."""
     try:
         res = requests.get("https://api.opendota.com/api/live", timeout=10)
         if res.status_code == 200:
             games = res.json()
-            t1_clean = team1_name.lower().strip()
-            t2_clean = team2_name.lower().strip()
+            words = [w.lower() for w in teams_raw.split() if len(w) > 2]
 
             for game in games:
                 r_name = game.get('radiant_name', '').lower()
                 d_name = game.get('dire_name', '').lower()
 
-                # Vérifie si l'une des équipes correspond
-                if (t1_clean and (t1_clean in r_name or t1_clean in d_name)) or \
-                   (t2_clean and (t2_clean in r_name or t2_clean in d_name)):
-                    return game
+                for word in words:
+                    if word in r_name or word in d_name:
+                        return game
     except Exception as e:
         print(f"⚠️ Erreur API OpenDota : {e}")
     return None
 
-def analyze_and_predict(raw_text):
-    """Extrait les équipes du texte LIVE, interroge OpenDota et applique le modèle."""
+def analyze_and_predict(match_data):
+    """Construit et envoie la notification Telegram."""
     try:
-        print(f"🔍 Traitement du match LIVE : {raw_text}")
-        
-        # Tentative d'extraction simplifiée des noms d'équipes
-        # Exemple de texte brut : "LIVE MAP 2 BO3 0:1 Moonlight Wispers 12 - 14 PLegion Tier-4..."
-        words = raw_text.split()
-        
-        # Envoi immédiat de l'alerte pour le match LIVE capturé
-        msg_live = f"🎮 **MATCH EN DIRECT DÉTECTÉ (Cyber Score) :**\n\n📌 `{raw_text}`"
-        
-        # Recherche complémentaire sur OpenDota pour prédiction XGBoost
-        # Exemple rapide pour tenter de matcher sur OpenDota via les mots principaux
-        possible_teams = [w for w in words if len(w) > 3 and w not in ["LIVE", "MAP", "BO3", "Tier-1", "Tier-2", "Tier-3", "Tier-4"]]
-        t1 = possible_teams[0] if len(possible_teams) > 0 else ""
-        t2 = possible_teams[1] if len(possible_teams) > 1 else ""
+        teams = match_data["teams_raw"]
+        league = match_data["league"]
+        map_info = match_data["map"]
+        score = match_data["score"]
 
-        live_data = get_opendota_live_match(t1, t2)
+        # 1. Message de base propre
+        msg = (
+            f"🔴 *MATCH EN DIRECT DÉTECTÉ*\n\n"
+            f"🏆 Ligue : *{league}*\n"
+            f"🗺️ Carte : `{map_info}` | Score : `{score}`\n"
+            f"👥 Équipes : *{teams}*\n"
+        )
+
+        # 2. Enrichissement avec OpenDota & XGBoost si disponible
+        live_data = get_opendota_live_match(teams)
 
         if live_data:
             match_id = live_data.get('match_id')
             r_score = live_data.get('radiant_score', 0)
             d_score = live_data.get('dire_score', 0)
             duration = live_data.get('duration', 0)
-            radiant_name = live_data.get('radiant_name', t1)
-            dire_name = live_data.get('dire_name', t2)
+            radiant_name = live_data.get('radiant_name', 'Radiant')
+            dire_name = live_data.get('dire_name', 'Dire')
 
             duration_minutes = duration / 60.0
             kill_diff = r_score - d_score
@@ -142,32 +203,33 @@ def analyze_and_predict(raw_text):
                 leader = radiant_name if prob_radiant >= 50 else dire_name
                 confiance = prob_radiant if prob_radiant >= 50 else (100 - prob_radiant)
 
-                msg_live += (
-                    f"\n\n⚡ *PRÉDICTION XGBOOST*\n"
+                msg += (
+                    f"\n⚡ *PRÉDICTION XGBOOST*\n"
                     f"🆔 Match ID : `{match_id}`\n"
                     f"⚔️ *{radiant_name}* vs *{dire_name}*\n"
-                    f"⏱️ Temps : {int(duration_minutes)} min | Score : {r_score} - {d_score}\n"
-                    f"🎯 Avantage : *{leader}* ({confiance:.1f}%)"
+                    f"⏱️ Temps : {int(duration_minutes)} min\n"
+                    f"🎯 Avantage : *{leader}* ({confiance:.1f}%)\n"
                 )
 
-        send_alert(msg_live)
+        send_alert(msg)
 
     except Exception as e:
         print(f"❌ Erreur analyse match : {e}")
 
 def run_bot():
-    print("🚀 Boucle de scraping ciblée LIVE démarrée...")
-    send_alert("🔴 **Filtre LIVE strict activé sur /en/matches/**\nScan en cours...")
+    print("🚀 Boucle de scraping Render démarrée...")
+    send_alert("⚙️ **Bot Dota 2 mis à jour et opérationnel sur Render !**")
 
     while True:
         try:
             live_matches = get_live_cyberscore_matches()
-            print(f"📡 Scan terminé : {len(live_matches)} match(s) LIVE trouvé(s).")
+            print(f"📡 Scan terminé : {len(live_matches)} match(s) LIVE extrait(s).")
             
-            for match_text in live_matches:
-                if match_text not in alert_cache:
-                    analyze_and_predict(match_text)
-                    alert_cache[match_text] = True
+            for match in live_matches:
+                cache_key = match["raw_key"]
+                if cache_key not in alert_cache:
+                    analyze_and_predict(match)
+                    alert_cache[cache_key] = True
 
         except Exception as e:
             print(f"❌ Erreur dans le cycle du bot : {e}")
