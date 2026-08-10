@@ -6,6 +6,7 @@ import warnings
 import requests
 import pandas as pd
 from flask import Flask
+from bs4 import BeautifulSoup
 from playwright.sync_api import sync_playwright
 
 warnings.filterwarnings("ignore", category=UserWarning)
@@ -44,51 +45,45 @@ def send_alert(message):
 
 def get_live_cyberscore_matches():
     """
-    Méthode 2 : Interception dynamique du DOM avec Playwright.
-    Localise les badges 'LIVE' et extrait le texte de la carte parent.
+    Extrait uniquement les matchs marqués 'LIVE' depuis https://cyberscore.live/en/matches/
     """
-    url = "https://cyberscore.live/en/match/"
-    extracted_matches = []
+    url = "https://cyberscore.live/en/matches/"
+    live_matches = []
     
     try:
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True)
             page = browser.new_page()
             
-            # Charger la page et attendre que le JS s'exécute complètement
+            # Chargement de la page des matchs
             page.goto(url, wait_until="networkidle", timeout=60000)
-            time.sleep(5)
+            time.sleep(4)
             
-            # Cibler les éléments contenant 'LIVE'
-            live_elements = page.locator("text=LIVE").all()
-            
-            for elem in live_elements:
-                try:
-                    # Remonter au bloc parent de la carte de match
-                    card = elem.locator("xpath=ancestor::a[1]")
-                    if card.count() == 0:
-                        card = elem.locator("xpath=ancestor::div[contains(@class, 'match') or contains(@class, 'card')][1]")
-                    
-                    if card.count() > 0:
-                        card_text = card.inner_text().strip()
-                        lines = [line.strip() for line in card_text.split("\n") if line.strip()]
-                        
-                        # Combiner les lignes pour créer une signature unique du match
-                        clean_entry = " | ".join(lines)
-                        if clean_entry and clean_entry not in extracted_matches:
-                            extracted_matches.append(clean_entry)
-                except Exception:
-                    continue
-
+            html = page.content()
             browser.close()
 
-    except Exception as e:
-        print(f"❌ Erreur Playwright Méthode 2 : {e}")
+        soup = BeautifulSoup(html, "html.parser")
         
-    return extracted_matches
+        # Récupération de tous les liens de matchs
+        links = soup.find_all("a", href=lambda h: h and "/en/match/" in h)
+        
+        for link in links:
+            text = link.get_text(" ", strip=True)
+            
+            # FILTRE STRICT : Uniquement si la carte contient 'LIVE'
+            if "LIVE" in text:
+                # Nettoyage des espaces doubles
+                clean_text = " ".join(text.split())
+                if clean_text not in live_matches:
+                    live_matches.append(clean_text)
+
+    except Exception as e:
+        print(f"❌ Erreur Scraping : {e}")
+        
+    return live_matches
 
 def get_opendota_live_match(team1_name, team2_name):
-    """Recherche le match correspondant sur l'API OpenDota Live."""
+    """Recherche la partie correspondante sur l'API OpenDota Live."""
     try:
         res = requests.get("https://api.opendota.com/api/live", timeout=10)
         if res.status_code == 200:
@@ -100,78 +95,74 @@ def get_opendota_live_match(team1_name, team2_name):
                 r_name = game.get('radiant_name', '').lower()
                 d_name = game.get('dire_name', '').lower()
 
-                if (t1_clean in r_name or t1_clean in d_name) or (t2_clean in r_name or t2_clean in d_name):
+                # Vérifie si l'une des équipes correspond
+                if (t1_clean and (t1_clean in r_name or t1_clean in d_name)) or \
+                   (t2_clean and (t2_clean in r_name or t2_clean in d_name)):
                     return game
     except Exception as e:
         print(f"⚠️ Erreur API OpenDota : {e}")
     return None
 
-def analyze_and_predict(match_raw_text):
-    """Analyse le contenu extrait, interroge OpenDota et exécute la prédiction."""
+def analyze_and_predict(raw_text):
+    """Extrait les équipes du texte LIVE, interroge OpenDota et applique le modèle."""
     try:
-        # Découpage du texte récupéré pour identifier les noms d'équipes
-        lines = match_raw_text.split(" | ")
-        team1 = lines[1] if len(lines) > 1 else "Équipe 1"
-        team2 = lines[-1] if len(lines) > 2 else "Équipe 2"
-
-        live_data = get_opendota_live_match(team1, team2)
-
-        if not live_data:
-            # Notification directe du match Cyber Score si absent d'OpenDota
-            msg = (
-                f"🎮 **Match LIVE détecté sur Cyber Score !**\n\n"
-                f"📋 `{match_raw_text}`"
-            )
-            send_alert(msg)
-            return
-
-        match_id = live_data.get('match_id')
-        r_score = live_data.get('radiant_score', 0)
-        d_score = live_data.get('dire_score', 0)
-        duration = live_data.get('duration', 0)
+        print(f"🔍 Traitement du match LIVE : {raw_text}")
         
-        radiant_name = live_data.get('radiant_name', team1)
-        dire_name = live_data.get('dire_name', team2)
+        # Tentative d'extraction simplifiée des noms d'équipes
+        # Exemple de texte brut : "LIVE MAP 2 BO3 0:1 Moonlight Wispers 12 - 14 PLegion Tier-4..."
+        words = raw_text.split()
+        
+        # Envoi immédiat de l'alerte pour le match LIVE capturé
+        msg_live = f"🎮 **MATCH EN DIRECT DÉTECTÉ (Cyber Score) :**\n\n📌 `{raw_text}`"
+        
+        # Recherche complémentaire sur OpenDota pour prédiction XGBoost
+        # Exemple rapide pour tenter de matcher sur OpenDota via les mots principaux
+        possible_teams = [w for w in words if len(w) > 3 and w not in ["LIVE", "MAP", "BO3", "Tier-1", "Tier-2", "Tier-3", "Tier-4"]]
+        t1 = possible_teams[0] if len(possible_teams) > 0 else ""
+        t2 = possible_teams[1] if len(possible_teams) > 1 else ""
 
-        if duration < 30:
-            return
+        live_data = get_opendota_live_match(t1, t2)
 
-        # Calcul des features pour XGBoost
-        kill_diff = r_score - d_score
-        kill_ratio = (r_score + 1) / (d_score + 1)
-        duration_minutes = duration / 60.0
+        if live_data:
+            match_id = live_data.get('match_id')
+            r_score = live_data.get('radiant_score', 0)
+            d_score = live_data.get('dire_score', 0)
+            duration = live_data.get('duration', 0)
+            radiant_name = live_data.get('radiant_name', t1)
+            dire_name = live_data.get('dire_name', t2)
 
-        features = pd.DataFrame([[r_score, d_score, kill_diff, kill_ratio, duration, duration_minutes]], 
-                                columns=['radiant_score', 'dire_score', 'kill_diff', 'kill_ratio', 'duration', 'duration_minutes'])
+            duration_minutes = duration / 60.0
+            kill_diff = r_score - d_score
+            kill_ratio = (r_score + 1) / (d_score + 1)
 
-        if model:
-            prob_radiant = model.predict_proba(features)[0][1] * 100
-            leader = radiant_name if prob_radiant >= 50 else dire_name
-            confiance = prob_radiant if prob_radiant >= 50 else (100 - prob_radiant)
+            if model and duration >= 30:
+                features = pd.DataFrame([[r_score, d_score, kill_diff, kill_ratio, duration, duration_minutes]], 
+                                        columns=['radiant_score', 'dire_score', 'kill_diff', 'kill_ratio', 'duration', 'duration_minutes'])
+                prob_radiant = model.predict_proba(features)[0][1] * 100
+                leader = radiant_name if prob_radiant >= 50 else dire_name
+                confiance = prob_radiant if prob_radiant >= 50 else (100 - prob_radiant)
 
-            msg = (
-                f"⚡ *PRÉDICTION MATCH EN DIRECT*\n\n"
-                f"🆔 Match ID : `{match_id}`\n"
-                f"⚔️ *{radiant_name}* vs *{dire_name}*\n"
-                f"⏱️ Temps : {int(duration_minutes)} min | Score : {r_score} - {d_score}\n\n"
-                f"🎯 Avantage : *{leader}*\n"
-                f"📊 Probabilité : *{confiance:.1f}%*\n"
-            )
-            send_alert(msg)
-        else:
-            send_alert(f"🎮 **Match en direct :** `{radiant_name}` vs `{dire_name}`\nScore: {r_score} - {d_score}")
+                msg_live += (
+                    f"\n\n⚡ *PRÉDICTION XGBOOST*\n"
+                    f"🆔 Match ID : `{match_id}`\n"
+                    f"⚔️ *{radiant_name}* vs *{dire_name}*\n"
+                    f"⏱️ Temps : {int(duration_minutes)} min | Score : {r_score} - {d_score}\n"
+                    f"🎯 Avantage : *{leader}* ({confiance:.1f}%)"
+                )
+
+        send_alert(msg_live)
 
     except Exception as e:
         print(f"❌ Erreur analyse match : {e}")
 
 def run_bot():
-    print("🚀 Boucle de scraping (Méthode 2) démarrée...")
-    send_alert("⚙️ **Passage à la Méthode 2 (Sélecteurs Playwright Négociés) !**\nScan actif...")
+    print("🚀 Boucle de scraping ciblée LIVE démarrée...")
+    send_alert("🔴 **Filtre LIVE strict activé sur /en/matches/**\nScan en cours...")
 
     while True:
         try:
             live_matches = get_live_cyberscore_matches()
-            print(f"📡 Scan terminé : {len(live_matches)} cartes LIVE extraites.")
+            print(f"📡 Scan terminé : {len(live_matches)} match(s) LIVE trouvé(s).")
             
             for match_text in live_matches:
                 if match_text not in alert_cache:
@@ -181,7 +172,7 @@ def run_bot():
         except Exception as e:
             print(f"❌ Erreur dans le cycle du bot : {e}")
         
-        time.sleep(180)  # Vérification toutes les 3 minutes
+        time.sleep(120)  # Scan toutes les 2 minutes
 
 if __name__ == "__main__":
     bot_thread = threading.Thread(target=run_bot, daemon=True)
