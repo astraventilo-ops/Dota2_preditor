@@ -3,3 +3,4 @@ requests
 beautifulsoup4
 pandas
 xgboost
+--extra-index-url https://pypi.org/simple
