@@ -1,9 +1,9 @@
+
 flask
 gunicorn
 xgboost
 joblib
 pandas
 numpy
-cloudscraper
-BeautifulSoup
---extra-index-url https://pypi.org/simple
+beautifulsoup4
+requests
