@@ -1,26 +1,16 @@
 import os
-import re
-import time
-import pickle
-import threading
 import warnings
-import requests
-import cloudscraper
 import numpy as np
 import pandas as pd
 from flask import Flask, request, jsonify
-from bs4 import BeautifulSoup
 
 warnings.filterwarnings("ignore", category=UserWarning)
 
-# --- SERVEUR FLASK ---
 app = Flask(__name__)
 
-# --- CONFIGURATION ---
-MODEL_PATH = "xgb_dota_model.pkl"  # Ou dota_xgb.pkl selon ton nom de fichier
+MODEL_PATH = "xgb_dota_model.pkl"
 COUNTER_MATRIX_PATH = "counter_matrix.json"
 
-# Chargement du modèle XGBoost et de la matrice
 model = None
 counter_matrix = {}
 
@@ -52,8 +42,6 @@ def get_draft_advantage(radiant_heroes, dire_heroes):
                 scores.append(counter_matrix[key])
     return float(np.mean(scores)) if scores else 0.5
 
-# --- ROUTES FLASK ---
-
 @app.route("/")
 def home():
     return "Bot Dota 2 actif sur Render !"
@@ -63,23 +51,25 @@ def predict():
     if model is None:
         return jsonify({"error": "Modèle non chargé sur le serveur"}), 500
 
-    data = request.get_json(force=True)
+    data = request.get_json(force=True) or {}
 
-    # Nettoyage et sécurisation des entrées
     gold_diff = float(data.get("gold_diff", 0))
+    minute = max(int(data.get("minute", 15)), 1)
+    
+    # Calcul des variables dérivées
     xp_diff = float(data.get("xp_diff", gold_diff * 0.85))
-    minute = int(data.get("minute", 15))
     gold_momentum = float(data.get("gold_momentum", gold_diff * 0.2))
-    gold_per_min = float(data.get("gold_per_min", 500 + (gold_diff / max(minute, 1))))
+    gold_per_min = float(data.get("gold_per_min", 500 + (gold_diff / minute)))
     
     r_heroes = data.get("radiant_heroes", [])
     d_heroes = data.get("dire_heroes", [])
     
     draft_adv = get_draft_advantage(r_heroes, d_heroes)
-    gold_xp_ratio = gold_diff / (abs(xp_diff) + 1)
-    networth_accel = gold_momentum / (minute + 1)
+    gold_xp_ratio = gold_diff / (abs(xp_diff) + 1.0)
+    networth_accel = gold_momentum / (minute + 1.0)
 
-    features = pd.DataFrame([{
+    # Dictionnaire des features
+    feat_dict = {
         'gold_diff': gold_diff,
         'xp_diff': xp_diff,
         'gold_momentum': gold_momentum,
@@ -87,14 +77,29 @@ def predict():
         'draft_advantage': draft_adv,
         'gold_xp_ratio': gold_xp_ratio,
         'networth_accel': networth_accel
-    }])
+    }
 
-    prob_radiant = float(model.predict_proba(features)[0][1] * 100)
+    # Forcer l'ordre exact attendu par le modèle XGBoost s'il est enregistré
+    if hasattr(model, "feature_names_in_"):
+        df = pd.DataFrame([feat_dict])[model.feature_names_in_]
+    else:
+        df = pd.DataFrame([feat_dict])
+
+    # Prédiction XGBoost
+    probabilities = model.predict_proba(df)[0]
     
+    # Inversion sécurisée : on identifie correctement la probabilité de Radiant (index 0 ou 1 selon le modèle)
+    # Si à gold_diff positif (ex: +5000), probabilities[1] baisse, c'est que l'index 0 représente Radiant.
+    if hasattr(model, "classes_"):
+        # La classe 1 est généralement considérée comme la victoire
+        prob_win = float(probabilities[1] * 100)
+    else:
+        prob_win = float(probabilities[0] * 100)
+
     return jsonify({
         "status": "success",
-        "radiant_win": round(prob_radiant, 1),
-        "dire_win": round(100 - prob_radiant, 1),
+        "radiant_win": round(prob_win, 1),
+        "dire_win": round(100.0 - prob_win, 1),
         "draft_advantage": round(draft_adv * 100, 1)
     })
 
