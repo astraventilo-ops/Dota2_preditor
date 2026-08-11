@@ -1,7 +1,6 @@
 import os
 import warnings
 import numpy as np
-import pandas as pd
 from flask import Flask, request, jsonify
 
 warnings.filterwarnings("ignore", category=UserWarning)
@@ -51,57 +50,49 @@ def predict():
     if model is None:
         return jsonify({"error": "Modèle non chargé sur le serveur"}), 500
 
-    data = request.get_json(force=True) or {}
+    try:
+        data = request.get_json(force=True) or {}
 
-    gold_diff = float(data.get("gold_diff", 0))
-    minute = max(int(data.get("minute", 15)), 1)
-    
-    # Calcul des variables dérivées
-    xp_diff = float(data.get("xp_diff", gold_diff * 0.85))
-    gold_momentum = float(data.get("gold_momentum", gold_diff * 0.2))
-    gold_per_min = float(data.get("gold_per_min", 500 + (gold_diff / minute)))
-    
-    r_heroes = data.get("radiant_heroes", [])
-    d_heroes = data.get("dire_heroes", [])
-    
-    draft_adv = get_draft_advantage(r_heroes, d_heroes)
-    gold_xp_ratio = gold_diff / (abs(xp_diff) + 1.0)
-    networth_accel = gold_momentum / (minute + 1.0)
+        # 1. Extraction des valeurs
+        gold_diff = float(data.get("gold_diff", 0))
+        minute = max(int(data.get("minute", 15)), 1)
+        xp_diff = float(data.get("xp_diff", gold_diff * 0.85))
+        gold_momentum = float(data.get("gold_momentum", gold_diff * 0.2))
+        gold_per_min = float(data.get("gold_per_min", 500 + (gold_diff / minute)))
+        
+        r_heroes = data.get("radiant_heroes", [])
+        d_heroes = data.get("dire_heroes", [])
+        draft_adv = get_draft_advantage(r_heroes, d_heroes)
+        
+        gold_xp_ratio = gold_diff / (abs(xp_diff) + 1.0)
+        networth_accel = gold_momentum / (minute + 1.0)
 
-    # Dictionnaire des features
-    feat_dict = {
-        'gold_diff': gold_diff,
-        'xp_diff': xp_diff,
-        'gold_momentum': gold_momentum,
-        'gold_per_min': gold_per_min,
-        'draft_advantage': draft_adv,
-        'gold_xp_ratio': gold_xp_ratio,
-        'networth_accel': networth_accel
-    }
+        # 2. Construction d'un tableau NumPy 2D dans l'ordre exact de l'entraînement
+        features_array = np.array([[
+            gold_diff,
+            xp_diff,
+            gold_momentum,
+            gold_per_min,
+            draft_adv,
+            gold_xp_ratio,
+            networth_accel
+        ]], dtype=np.float32)
 
-    # Forcer l'ordre exact attendu par le modèle XGBoost s'il est enregistré
-    if hasattr(model, "feature_names_in_"):
-        df = pd.DataFrame([feat_dict])[model.feature_names_in_]
-    else:
-        df = pd.DataFrame([feat_dict])
+        # 3. Prédiction de la probabilité
+        proba = model.predict_proba(features_array)[0]
+        
+        # Sur XGBoost, proba[1] est généralement la classe 1 (Victoire Radiant)
+        prob_radiant = float(proba[1] * 100.0)
 
-    # Prédiction XGBoost
-    probabilities = model.predict_proba(df)[0]
-    
-    # Inversion sécurisée : on identifie correctement la probabilité de Radiant (index 0 ou 1 selon le modèle)
-    # Si à gold_diff positif (ex: +5000), probabilities[1] baisse, c'est que l'index 0 représente Radiant.
-    if hasattr(model, "classes_"):
-        # La classe 1 est généralement considérée comme la victoire
-        prob_win = float(probabilities[1] * 100)
-    else:
-        prob_win = float(probabilities[0] * 100)
+        return jsonify({
+            "status": "success",
+            "radiant_win": round(prob_radiant, 1),
+            "dire_win": round(100.0 - prob_radiant, 1),
+            "draft_advantage": round(draft_adv * 100.0, 1)
+        })
 
-    return jsonify({
-        "status": "success",
-        "radiant_win": round(prob_win, 1),
-        "dire_win": round(100.0 - prob_win, 1),
-        "draft_advantage": round(draft_adv * 100, 1)
-    })
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
