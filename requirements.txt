@@ -1,4 +1,3 @@
-
 flask
 gunicorn
 xgboost
@@ -7,3 +6,4 @@ pandas
 numpy
 beautifulsoup4
 requests
+cloudscraper
