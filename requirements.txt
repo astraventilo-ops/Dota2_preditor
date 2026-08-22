@@ -1,9 +1,3 @@
-flask
-gunicorn
-xgboost
-joblib
-pandas
-numpy
-beautifulsoup4
-requests
-cloudscraper
+fastapi
+uvicorn
+playwright
