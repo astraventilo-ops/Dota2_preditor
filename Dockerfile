@@ -1,33 +1,15 @@
-FROM python:3.10-slim
+# Utilise l'image officielle Playwright pour Python
+FROM mcr.microsoft.com/playwright/python:v1.40.0-jammy
 
-# Dependances systeme Linux requis pour Chromium
-RUN apt-get update && apt-get install -y \
-    wget \
-    gnupg \
-    libglib2.0-0 \
-    libnss3 \
-    libnspr4 \
-    libatk1.0-0 \
-    libatk-bridge2.0-0 \
-    libcups2 \
-    libdrm2 \
-    libxkbcommon0 \
-    libxcomposite1 \
-    libxdamage1 \
-    libxfixes3 \
-    libxrandr2 \
-    libgbm1 \
-    libasound2 \
-    && rm -rf /var/lib/apt/lists/*
-
+# Définit le répertoire de travail
 WORKDIR /app
 
+# Copie et installe les dépendances Python
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
-RUN playwright install chromium
 
+# Copie le code source de ton bot
 COPY . .
 
-EXPOSE 10000
-
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "10000"]
+# Commande exécutée à chaque lancement du conteneur
+CMD ["python", "bot.py"]
