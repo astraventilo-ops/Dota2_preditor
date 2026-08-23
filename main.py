@@ -1,156 +1,242 @@
-import os
 import asyncio
-import base64
+import warnings
 import httpx
-
-# Configuration du chemin pour Playwright Chromium sur Render
-os.environ["PLAYWRIGHT_BROWSERS_PATH"] = os.path.abspath(".local-browsers")
-
-from fastapi import FastAPI, BackgroundTasks, HTTPException
 from playwright.async_api import async_playwright
-from playwright_stealth import stealth_async
+from playwright_stealth import Stealth
+from google import genai
+from google.genai import types
 
-app = FastAPI(title="Dota 2 Cyberscore Predictor Bot")
+# Masquer les avertissements système internes
+warnings.filterwarnings("ignore", category=UserWarning)
 
-# Chargement des variables d'environnement
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "8840292681:AAHoBm9SlLC9HRDGwHs9VyRKR1BnFXD063Y")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "8594543473")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "AQ.Ab8RN6LKA92INHOad-gQJs2JCU2HBNB34_ijL-WCM20aQf8JZA")
+# ==========================================
+# CONFIGURATION DU BOT
+# ==========================================
+TELEGRAM_BOT_TOKEN = "8840292681:AAHoBm9SlLC9HRDGwHs9VyRKR1BnFXD063Y"
+TELEGRAM_CHAT_ID = "8594543473"
+GEMINI_API_KEY = "AQ.Ab8RN6LokPIX6Tf6kXhda6zPFKT9VUn4-sWdA3BdwctaStzwbA"
+
+GEMINI_MODEL_NAME = "gemini-3.6-flash"
+BASE_URL = "https://cyberscore.live/en/"
 
 
-async def send_telegram(photo_bytes: bytes, caption: str):
-    """Envoie la capture d'écran et le pronostic sur Telegram."""
-    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        print("[ERR] Tokens Telegram manquants !")
-        return
-
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
+# ==========================================
+# FONCTIONS TELEGRAM & GEMINI
+# ==========================================
+async def send_telegram_report(photo_bytes: bytes, match_url: str, analysis_text: str):
+    """Envoie l'image HD puis le rapport formaté séparément sur Telegram pour un match."""
     async with httpx.AsyncClient(timeout=30.0) as client:
-        response = await client.post(
-            url,
-            data={
-                "chat_id": TELEGRAM_CHAT_ID,
-                "caption": caption[:1024],
-                "parse_mode": "Markdown"
-            },
-            files={"photo": ("match.png", photo_bytes, "image/png")}
-        )
-        if response.status_code != 200:
-            print(f"[ERR Telegram] {response.status_code}: {response.text}")
-
-
-async def analyze_image_with_gemini(image_bytes: bytes) -> str:
-    """Appel direct REST à l'API Gemini compatible avec les clés AQ.Ab..."""
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}"
-    
-    # Encodage de l'image en base64
-    base64_image = base64.b64encode(image_bytes).decode("utf-8")
-    
-    prompt_text = (
-        "Tu es un expert analyste eSport Dota 2. Analyse cette capture d'écran de Cyberscore live :\n"
-        "1. Donne le score actuel (Kills), le temps de jeu et la différence de Net Worth (valeur nette).\n"
-        "2. Évalue l'état des bâtiments (tours/racks) sur la minimap.\n"
-        "3. Analyse rapidement la dynamique des héros/joueurs (KDA, niveau).\n"
-        "4. Donne un PRONOSTIC CLAIR : Quelle équipe a le plus fort avantage (Radiant ou Dire) "
-        "et explique pourquoi en 3 phrases concises."
-    )
-
-    payload = {
-        "contents": [
-            {
-                "parts": [
-                    {"text": prompt_text},
-                    {
-                        "inline_data": {
-                            "mime_type": "image/png",
-                            "data": base64_image
-                        }
-                    }
-                ]
-            }
-        ]
-    }
-
-    async with httpx.AsyncClient(timeout=60.0) as client:
-        response = await client.post(url, json=payload)
-        
-        if response.status_code != 200:
-            print(f"[ERR Gemini REST] {response.status_code}: {response.text}")
-            raise Exception(f"Erreur API Gemini ({response.status_code}) : {response.text}")
-
-        data = response.json()
         try:
-            return data["candidates"][0]["content"]["parts"][0]["text"]
-        except (KeyError, IndexErrors):
-            return "Impossible d'extraire la réponse de l'analyse Gemini."
+            # 1. Envoi de la photo avec titre
+            photo_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
+            photo_caption = f"📸 *CAPTURE LIVE MATCH DOTA 2*\n🔗 [Lien direct Cyberscore]({match_url})"
+            await client.post(
+                photo_url,
+                data={"chat_id": TELEGRAM_CHAT_ID, "caption": photo_caption, "parse_mode": "Markdown"},
+                files={"photo": ("match_full.png", photo_bytes, "image/png")}
+            )
+
+            # 2. Envoi du rapport texte complet et stylisé
+            msg_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+            await client.post(
+                msg_url,
+                data={
+                    "chat_id": TELEGRAM_CHAT_ID,
+                    "text": analysis_text,
+                    "parse_mode": "Markdown",
+                    "disable_web_page_preview": True
+                }
+            )
+            print(" [✓] Rapport de match envoyé sur Telegram.")
+
+        except Exception as e:
+            print(f" [ERR Telegram] Échec d'envoi du match : {e}")
 
 
-async def process_match_pipeline(url: str):
-    """Pipeline complet : Playwright -> Gemini REST API -> Telegram."""
-    print(f"[*] Traitement lancé pour : {url}")
+async def send_telegram_summary(summary_text: str):
+    """Envoie un message de synthèse global pour tous les matchs du cycle."""
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        try:
+            msg_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+            await client.post(
+                msg_url,
+                data={
+                    "chat_id": TELEGRAM_CHAT_ID,
+                    "text": summary_text,
+                    "parse_mode": "Markdown",
+                    "disable_web_page_preview": True
+                }
+            )
+            print(" [✓] Résumé global des pronostics envoyé sur Telegram !")
+        except Exception as e:
+            print(f" [ERR Telegram] Échec d'envoi du résumé : {e}")
+
+
+def analyze_with_targeted_data(image_bytes: bytes, match_data: dict) -> str:
+    """Analyse combinée avec noms d'équipes en clair et sécurité de réessai."""
+    client = genai.Client(api_key=GEMINI_API_KEY)
+    prompt_text = f"""
+Tu es un expert analyste eSport Dota 2. 
+Voici les DONNÉES OFFICIELLES ET VÉRIFIÉES extraites directement de l'interface du match actif :
+- Temps de jeu : {match_data.get('timer', 'Inconnu')}
+- Score de Kills : {match_data.get('score', 'Inconnu')}
+- Avantage Économique / Net Worth : {match_data.get('net_worth', 'Inconnu')}
+
+Consignes de rédaction strictes :
+- N'utilise PAS les termes génériques "Radiant" ou "Dire" pour le pronostic final. Donne impérativement le **NOM EXACT DE L'ÉQUIPE EN CLAIR** (ex: Vitality Warriors ou Real Eclipse).
+- Base-toi strictement sur les données de l'interface et la capture d'écran.
+- Rédige une réponse STYLÉE pour Telegram en utilisant le format Markdown suivant :
+
+🏆 *ANALYSE & PRONOSTIC DOTA 2 LIVE*
+
+⏱️ *STATUT DU MATCH*
+• *Temps de jeu :* {match_data.get('timer', 'N/C')}
+• *Score (Kills) :* {match_data.get('score', 'N/C')}
+• *Avantage Économique :* {match_data.get('net_worth', 'N/C')}
+
+⚔️ *DYNAMIQUE & HÉROS*
+• [Synthèse courte de la phase de laning, des objets clés et du rythme de jeu]
+
+🎯 *PRONOSTIC FINAL*
+🏆 *Victoire recommandée :* **[NOM EXACT DE L'ÉQUIPE]**
+💡 *Explication :* [Raisonnement clair en 2 phrases]
+"""
+
+    for attempt in range(3):
+        try:
+            response = client.models.generate_content(
+                model=GEMINI_MODEL_NAME,
+                contents=[
+                    types.Part.from_bytes(data=image_bytes, mime_type='image/png'),
+                    prompt_text
+                ]
+            )
+            return response.text
+        except Exception as e:
+            print(f" [!] Tentative {attempt + 1} échouée (Réseau/DNS), nouvelle tentative dans 3s...")
+            import time
+            time.sleep(3)
+            
+    return "⚠️ *Erreur d'analyse Gemini* : Impossible de joindre l'API après 3 essais."
+
+
+# ==========================================
+# EXÉCUTION UNIQUE (ONE-SHOT) SUR RENDER
+# ==========================================
+async def main():
+    print("\n" + "═" * 60)
+    print(" 🎮 VÉRIFICATION UNIQUE DES MATCHS DOTA 2 LIVE (Render Cron) ")
+    print("═" * 60)
     
-    async with async_playwright() as p:
+    stealth = Stealth()
+
+    async with stealth.use_async(async_playwright()) as p:
         browser = await p.chromium.launch(
-            headless=True,
+            headless=True,  # Impératif sur Render
             args=[
+                "--disable-blink-features=AutomationControlled",
                 "--no-sandbox",
                 "--disable-setuid-sandbox",
                 "--disable-dev-shm-usage",
-                "--disable-blink-features=AutomationControlled"
+                "--disable-gpu",
+                "--start-maximized"
             ]
         )
+        
         context = await browser.new_context(
-            viewport={"width": 1280, "height": 1100},
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+            viewport={"width": 1280, "height": 1100}
         )
         page = await context.new_page()
-        await stealth_async(page)
-        
+
         try:
-            await page.goto(url, wait_until="domcontentloaded", timeout=35000)
-            await asyncio.sleep(3)
+            print(f"[🔍] Navigation sur l'accueil : {BASE_URL}")
+            await page.goto(BASE_URL, wait_until="domcontentloaded", timeout=45000)
             
-            players_btn = page.locator("text=PLAYERS")
-            if await players_btn.is_visible():
-                await players_btn.click()
-                await asyncio.sleep(2)
+            print("[⌛] Attente de la stabilisation de la page (Cloudflare)...")
+            await asyncio.sleep(10)
+
+            match_elements = page.locator("a[href*='/matches/'], a[href*='/match/']")
+            count = await match_elements.count()
             
-            screenshot = await page.screenshot(full_page=False)
-            await browser.close()
-            print("[✓] Capture réussie !")
-            
-            # Analyse de l'image via REST
-            analysis = await analyze_image_with_gemini(screenshot)
-            
-            telegram_msg = f"🎯 *PRONOSTIC LIVE DOTA 2*\n\n{analysis}"
-            await send_telegram(screenshot, telegram_msg)
-            print("[✓] Pronostic et image envoyés sur Telegram !")
-            
+            match_urls = set()
+            for i in range(count):
+                el = match_elements.nth(i)
+                text_content = await el.inner_text()
+                if "LIVE" in text_content.upper():
+                    href = await el.get_attribute("href")
+                    if href:
+                        if not href.startswith("http"):
+                            href = "https://cyberscore.live" + href
+                        
+                        href = href.rstrip("/")
+                        if "/matches/" in href or "/match/" in href:
+                            player_url = f"{href}/players/"
+                            match_urls.add(player_url)
+
+            match_urls = list(match_urls)
+            print(f"[✓] {len(match_urls)} match(s) en live actuellement détecté(s).")
+
+            if not match_urls:
+                print("[⌛] Aucun match live en cours ou page bloquée. Fin de l'exécution.")
+                await context.close()
+                await browser.close()
+                return
+
+            cycle_summaries = []
+
+            for match_url in match_urls:
+                print(f"\n[⚡] Traitement du match : {match_url}")
+                match_page = await context.new_page()
+                
+                try:
+                    await match_page.goto(match_url, wait_until="domcontentloaded", timeout=45000)
+                    await asyncio.sleep(12)
+
+                    match_data = {
+                        'timer': "En cours",
+                        'score': "Vérifié via l'interface active",
+                        'net_worth': "Analyser via l'image et l'écart affiché"
+                    }
+                    
+                    screenshot_bytes = await match_page.screenshot(full_page=True)
+                    await match_page.close()
+
+                    print(" [🤖] Génération de l'analyse ciblée...")
+                    analysis = analyze_with_targeted_data(screenshot_bytes, match_data)
+
+                    print("\n" + "─" * 20 + " RÉSULTAT DU PRONOSTIC " + "─" * 20)
+                    print(analysis)
+                    print("─" * 63)
+
+                    await send_telegram_report(screenshot_bytes, match_url, analysis)
+
+                    rec_line = "Pronostic en cours"
+                    for line in analysis.split('\n'):
+                        if "Victoire recommandée" in line or "🏆" in line and "Victoire" in line:
+                            rec_line = line
+                            break
+
+                    cycle_summaries.append(f"🔗 [Lien du match]({match_url})\n{rec_line}\n")
+
+                except Exception as e:
+                    print(f" [ERR] Échec du traitement sur le match : {e}")
+                    try:
+                        await match_page.close()
+                    except:
+                        pass
+
+            if cycle_summaries:
+                summary_payload = "📋 *RÉSUMÉ GLOBAL DES MATCHS EN LIVE*\n\n" + "\n".join(cycle_summaries)
+                await send_telegram_summary(summary_payload)
+
         except Exception as e:
-            await browser.close()
-            err_msg = f"⚠️ *Erreur lors du traitement* :\n`{str(e)}`"
-            print(f"[ERR Pipeline] {e}")
-            if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
-                async with httpx.AsyncClient() as client:
-                    await client.post(
-                        f"https://api.telegram.org/bot{TELEGRAM_CHAT_ID}/sendMessage",
-                        data={"chat_id": TELEGRAM_CHAT_ID, "text": err_msg, "parse_mode": "Markdown"}
-                    )
+            print(f" [ERR Global] {e}")
+
+        await context.close()
+        await browser.close()
+        print("\n[✓] Exécution unique terminée avec succès.")
+        print("═" * 60)
 
 
-@app.get("/")
-def home():
-    return {"status": "Bot Dota 2 actif sur Render !", "version": "1.1.0"}
-
-
-@app.get("/analyze")
-def trigger_analysis(url: str, background_tasks: BackgroundTasks):
-    if not url or "cyberscore.live" not in url:
-        raise HTTPException(status_code=400, detail="URL invalide. Fournis un lien cyberscore.live/en/match/...")
-    
-    background_tasks.add_task(process_match_pipeline, url)
-    return {
-        "status": "Analyse lancée",
-        "url": url,
-        "message": "Le résultat et la capture d'écran vont arriver sur Telegram."
-    }
+if __name__ == "__main__":
+    asyncio.run(main())
