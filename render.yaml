@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: dota2-cyberscore-bot
+    env: docker
+    region: frankfurt
+    plan: free
+    envVars:
+      - key: TELEGRAM_BOT_TOKEN
+        value: 8840292681:AAHoBm9SlLC9HRDGwHs9VyRKR1BnFXD063Y
+      - key: TELEGRAM_CHAT_ID
+        value: "8594543473"
+      - key: GEMINI_API_KEY
+        value: AQ.Ab8RN6Lbtp9FNIqojFrUyI9ODlK9SQOEocMlDqe6ibgRETN6wA
