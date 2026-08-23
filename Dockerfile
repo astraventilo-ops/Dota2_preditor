@@ -1,6 +1,6 @@
 FROM python:3.10-slim
 
-# Dependances systeme Linux pour Chromium
+# Dependances systeme Linux requis pour Chromium
 RUN apt-get update && apt-get install -y \
     wget \
     gnupg \
