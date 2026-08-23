@@ -20,7 +20,6 @@ GEMINI_MODEL_NAME = "gemini-3.6-flash"
 BASE_URL = "https://cyberscore.live/en/"
 CHECK_INTERVAL_SECONDS = 60  # Pause de 60 secondes entre chaque cycle
 
-
 # ==========================================
 # FONCTIONS TELEGRAM & GEMINI
 # ==========================================
