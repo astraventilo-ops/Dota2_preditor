@@ -1,6 +1,8 @@
 import asyncio
+import os
 import warnings
 import httpx
+from aiohttp import web
 from playwright.async_api import async_playwright
 from playwright_stealth import Stealth
 from google import genai
@@ -120,18 +122,18 @@ Consignes de rédaction strictes :
 
 
 # ==========================================
-# BOUCLE PRINCIPALE INTELLIGENTE (WEB SERVICE GRATUIT)
+# TÂCHE DE FOND (LE BOT DOTA 2 EN BOUCLE)
 # ==========================================
-async def main():
+async def dota_bot_loop():
     print("\n" + "═" * 60)
-    print(" 🎮 BOT DOTA 2 LIVE - MODE WEB SERVICE GRATUIT (60s intervalle) ")
+    print(" 🎮 BOT DOTA 2 LIVE - LANCEMENT DE LA BOUCLE PRINCIPALE ")
     print("═" * 60)
     
     stealth = Stealth()
 
     while True:
         try:
-            print(pro_msg := "\n[🔄] Lancement d'un nouveau cycle de vérification...")
+            print("\n[🔄] Lancement d'un nouveau cycle de vérification...")
             async with stealth.use_async(async_playwright()) as p:
                 browser = await p.chromium.launch(
                     headless=True,
@@ -221,9 +223,33 @@ async def main():
         except Exception as e:
             print(f" [ERR Global du cycle] {e}")
 
-        # Pause exacte de 60 secondes avant de relancer le navigateur (protège l'IP et reste gratuit)
         print(f"[⌛] Pause de {CHECK_INTERVAL_SECONDS} secondes avant le prochain check...")
         await asyncio.sleep(CHECK_INTERVAL_SECONDS)
+
+
+# ==========================================
+# SERVEUR WEB POUR SATISFAIRE RENDER
+# ==========================================
+async def handle_ping(request):
+    return web.Response(text="Dota 2 Bot is running live!")
+
+async def start_web_server():
+    app = web.Application()
+    app.router.add_get("/", handle_ping)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    
+    # Render attribue dynamiquement un port via la variable d'environnement PORT
+    port = int(os.environ.get("PORT", 10000))
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+    print(f"[🌐] Mini serveur web démarré sur le port {port} pour valider Render.")
+
+
+async def main():
+    # Lance simultanément le serveur web (pour Render) et la boucle du bot (pour Telegram/Dota)
+    await start_web_server()
+    await dota_bot_loop()
 
 
 if __name__ == "__main__":
