@@ -8,13 +8,13 @@ from google import genai
 
 app = FastAPI(title="Dota 2 Cyberscore Predictor Bot")
 
-# Tokens et cles integres (avec fallback automatique)
+# Identifiants avec valeurs de secours (fallback)
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "8840292681:AAHoBm9SlLC9HRDGwHs9VyRKR1BnFXD063Y")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "8594543473")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "AQ.Ab8RN6Lbtp9FNIqojFrUyI9ODlK9SQOEocMlDqe6ibgRETN6wA")
 
 async def send_telegram(photo_bytes: bytes, caption: str):
-    """Envoie la capture d'ecran et l'analyse sur Telegram."""
+    """Envoie la capture d'ecran et le pronostic vers Telegram."""
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         print("[ERR] Tokens Telegram manquants !")
         return
@@ -25,7 +25,7 @@ async def send_telegram(photo_bytes: bytes, caption: str):
             url,
             data={
                 "chat_id": TELEGRAM_CHAT_ID,
-                "caption": caption[:1024],  # Limite Telegram
+                "caption": caption[:1024],  # Limite max pour les legendes Telegram
                 "parse_mode": "Markdown"
             },
             files={"photo": ("match.png", photo_bytes, "image/png")}
@@ -34,8 +34,8 @@ async def send_telegram(photo_bytes: bytes, caption: str):
             print(f"[ERR Telegram] {response.status_code}: {response.text}")
 
 async def process_match_pipeline(url: str):
-    """Pipeline autonome : Playwright -> Gemini 2.5 Flash -> Telegram."""
-    print(f"[*] Traitement lance pour : {url}")
+    """Pipeline complet : Navigation Playwright -> Capture -> Gemini Vision -> Telegram."""
+    print(f"[*] Traitement debute pour : {url}")
     
     async with async_playwright() as p:
         browser = await p.chromium.launch(
@@ -59,18 +59,18 @@ async def process_match_pipeline(url: str):
             await page.goto(url, wait_until="domcontentloaded", timeout=35000)
             await asyncio.sleep(3)
             
-            # Clic automatique sur l'onglet PLAYERS
+            # Clic automatique sur l'onglet PLAYERS si disponible
             players_btn = page.locator("text=PLAYERS")
             if await players_btn.is_visible():
                 await players_btn.click()
                 await asyncio.sleep(2)
             
-            # Capture d'ecran
+            # Prise de capture d'ecran
             screenshot = await page.screenshot(full_page=False)
             await browser.close()
             print("[✓] Capture reussie !")
             
-            # Initialisation du client Gemini
+            # Initialisation du client Google GenAI
             ai_client = genai.Client(api_key=GEMINI_API_KEY)
             
             prompt = (
@@ -82,7 +82,7 @@ async def process_match_pipeline(url: str):
                 "et explique pourquoi en 3 phrases concises."
             )
             
-            # Requete Gemini Vision
+            # Appel au modele Gemini 2.5 Flash avec Vision
             response = ai_client.models.generate_content(
                 model='gemini-2.5-flash',
                 contents=[
@@ -93,10 +93,10 @@ async def process_match_pipeline(url: str):
             
             analysis = response.text if response.text else "Aucune analyse generee."
             
-            # Message Telegram
+            # Envoi sur Telegram
             telegram_msg = f"🎯 *PRONOSTIC LIVE DOTA 2*\n\n{analysis}"
             await send_telegram(screenshot, telegram_msg)
-            print("[✓] Pronostic et image envoyes sur Telegram !")
+            print("[✓] Pronostic et image envoyes sur Telegram avec succes !")
             
         except Exception as e:
             await browser.close()
@@ -115,9 +115,9 @@ def home():
 
 @app.get("/analyze")
 def trigger_analysis(url: str, background_tasks: BackgroundTasks):
-    """Route pour declencher une analyse de match."""
+    """Route pour declencher l'analyse d'un match Cyberscore."""
     if not url or "cyberscore.live" not in url:
-        raise HTTPException(status_code=400, detail="URL invalide. Fournis un lien cyberscore.live/en/match/...")
+        raise HTTPException(status_code=400, detail="URL invalide. Fournis un lien du type https://cyberscore.live/en/match/...")
     
     background_tasks.add_task(process_match_pipeline, url)
     return {
