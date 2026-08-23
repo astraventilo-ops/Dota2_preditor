@@ -11,5 +11,5 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copie le code source de ton bot
 COPY . .
 
-# Commande exécutée à chaque lancement du conteneur
-CMD ["python", "bot.py"]
+# Commande exécutée pour lancer ton main.py
+CMD ["python", "main.py"]
