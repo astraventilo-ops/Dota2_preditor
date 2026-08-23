@@ -1,24 +1,22 @@
 import os
 import asyncio
 import httpx
+
+# Redirection forcée du dossier des navigateurs
+os.environ["PLAYWRIGHT_BROWSERS_PATH"] = os.path.abspath(".local-browsers")
+
 from fastapi import FastAPI, BackgroundTasks, HTTPException
-
-# Force Playwright a utiliser un dossier local accessible
-os.environ["PLAYWRIGHT_BROWSERS_PATH"] = os.path.join(os.getcwd(), "pw-browsers")
-
 from playwright.async_api import async_playwright
 from playwright_stealth import stealth_async
 from google import genai
 
 app = FastAPI(title="Dota 2 Cyberscore Predictor Bot")
 
-# Tokens et cles integres (avec fallback automatique)
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "8840292681:AAHoBm9SlLC9HRDGwHs9VyRKR1BnFXD063Y")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "8594543473")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "AQ.Ab8RN6Lbtp9FNIqojFrUyI9ODlK9SQOEocMlDqe6ibgRETN6wA")
 
 async def send_telegram(photo_bytes: bytes, caption: str):
-    """Envoie la capture d'ecran et l'analyse sur Telegram."""
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         print("[ERR] Tokens Telegram manquants !")
         return
@@ -38,7 +36,6 @@ async def send_telegram(photo_bytes: bytes, caption: str):
             print(f"[ERR Telegram] {response.status_code}: {response.text}")
 
 async def process_match_pipeline(url: str):
-    """Pipeline autonome : Playwright -> Gemini 2.5 Flash -> Telegram."""
     print(f"[*] Traitement lance pour : {url}")
     
     async with async_playwright() as p:
@@ -102,7 +99,7 @@ async def process_match_pipeline(url: str):
             if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
                 async with httpx.AsyncClient() as client:
                     await client.post(
-                        f"https://api.telegram.org/bot{TELEGRAM_CHAT_ID}/sendMessage",
+                        f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
                         data={"chat_id": TELEGRAM_CHAT_ID, "text": err_msg, "parse_mode": "Markdown"}
                     )
 
