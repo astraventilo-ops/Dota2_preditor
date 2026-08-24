@@ -18,7 +18,8 @@ TELEGRAM_BOT_TOKEN = "8840292681:AAHoBm9SlLC9HRDGwHs9VyRKR1BnFXD063Y"
 TELEGRAM_CHAT_ID = "8594543473"
 GEMINI_API_KEY = "AQ.Ab8RN6LokPIX6Tf6kXhda6zPFKT9VUn4-sWdA3BdwctaStzwbA"
 
-GEMINI_MODEL_NAME = "gemini-3.6-flash"
+# Utilisation d'un modèle flash stable et standard pour éviter les erreurs d'API
+GEMINI_MODEL_NAME = "gemini-1.5-flash"
 BASE_URL = "https://cyberscore.live/en/"
 CHECK_INTERVAL_SECONDS = 60  # Pause de 60 secondes entre chaque cycle
 
@@ -74,7 +75,7 @@ async def send_telegram_summary(summary_text: str):
 
 
 def analyze_with_targeted_data(image_bytes: bytes, match_data: dict) -> str:
-    """Analyse combinée avec noms d'équipes en clair et sécurité de réessai."""
+    """Analyse sécurisée avec capture exacte de l'erreur Gemini."""
     client = genai.Client(api_key=GEMINI_API_KEY)
     prompt_text = f"""
 Tu es un expert analyste eSport Dota 2. 
@@ -112,13 +113,14 @@ Consignes de rédaction strictes :
                     prompt_text
                 ]
             )
-            return response.text
+            if response and response.text:
+                return response.text
         except Exception as e:
-            print(f" [!] Tentative {attempt + 1} échouée, nouvelle tentative dans 3s...")
+            print(f" [!] Tentative Gemini {attempt + 1} échouée. Erreur exacte : {e}")
             import time
             time.sleep(3)
             
-    return "⚠️ *Erreur d'analyse Gemini* : Impossible de joindre l'API après 3 essais."
+    return "⚠️ *Erreur d'analyse Gemini* : Impossible de joindre l'API (Vérifie ta clé API ou le modèle)."
 
 
 # ==========================================
@@ -239,7 +241,6 @@ async def start_web_server():
     runner = web.AppRunner(app)
     await runner.setup()
     
-    # Render attribue dynamiquement un port via la variable d'environnement PORT
     port = int(os.environ.get("PORT", 10000))
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
@@ -247,7 +248,6 @@ async def start_web_server():
 
 
 async def main():
-    # Lance simultanément le serveur web (pour Render) et la boucle du bot (pour Telegram/Dota)
     await start_web_server()
     await dota_bot_loop()
 
