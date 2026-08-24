@@ -5,8 +5,7 @@ import httpx
 from aiohttp import web
 from playwright.async_api import async_playwright
 from playwright_stealth import Stealth
-from google import genai
-from google.genai import types
+import google.generativeai as genai
 
 # Masquer les avertissements système internes
 warnings.filterwarnings("ignore", category=UserWarning)
@@ -16,10 +15,12 @@ warnings.filterwarnings("ignore", category=UserWarning)
 # ==========================================
 TELEGRAM_BOT_TOKEN = "8840292681:AAHoBm9SlLC9HRDGwHs9VyRKR1BnFXD063Y"
 TELEGRAM_CHAT_ID = "8594543473"
-GEMINI_API_KEY = "AQ.Ab8RN6LokPIX6Tf6kXhda6zPFKT9VUn4-sWdA3BdwctaStzwbA"
+GEMINI_API_KEY = "AQ.Ab8RN6KTg1OYFdhKtXP6p-hPg0vu5uztePiemDr_Wqm1gkow"
 
-# Utilisation d'un modèle flash stable et standard pour éviter les erreurs d'API
+# Configuration de la clé Gemini
+genai.configure(api_key=GEMINI_API_KEY)
 GEMINI_MODEL_NAME = "gemini-1.5-flash"
+
 BASE_URL = "https://cyberscore.live/en/"
 CHECK_INTERVAL_SECONDS = 60  # Pause de 60 secondes entre chaque cycle
 
@@ -75,8 +76,7 @@ async def send_telegram_summary(summary_text: str):
 
 
 def analyze_with_targeted_data(image_bytes: bytes, match_data: dict) -> str:
-    """Analyse sécurisée avec capture exacte de l'erreur Gemini."""
-    client = genai.Client(api_key=GEMINI_API_KEY)
+    """Analyse sécurisée avec l'ancienne bibliothèque Google Generative AI."""
     prompt_text = f"""
 Tu es un expert analyste eSport Dota 2. 
 Voici les DONNÉES OFFICIELLES ET VÉRIFIÉES extraites directement de l'interface du match actif :
@@ -104,15 +104,15 @@ Consignes de rédaction strictes :
 💡 *Explication :* [Raisonnement clair en 2 phrases]
 """
 
+    image_part = {
+        "mime_type": "image/png",
+        "data": image_bytes
+    }
+
     for attempt in range(3):
         try:
-            response = client.models.generate_content(
-                model=GEMINI_MODEL_NAME,
-                contents=[
-                    types.Part.from_bytes(data=image_bytes, mime_type='image/png'),
-                    prompt_text
-                ]
-            )
+            model = genai.GenerativeModel(GEMINI_MODEL_NAME)
+            response = model.generate_content([prompt_text, image_part])
             if response and response.text:
                 return response.text
         except Exception as e:
@@ -120,7 +120,7 @@ Consignes de rédaction strictes :
             import time
             time.sleep(3)
             
-    return "⚠️ *Erreur d'analyse Gemini* : Impossible de joindre l'API (Vérifie ta clé API ou le modèle)."
+    return "⚠️ *Erreur d'analyse Gemini* : Impossible de joindre l'API après 3 essais."
 
 
 # ==========================================
