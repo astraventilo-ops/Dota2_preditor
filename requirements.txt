@@ -1,5 +1,6 @@
-playwright
-playwright-stealth
+
 google-generativeai
-httpx
-aiohttp
+playwright
+schedule
+Pillow
+requests
